@@ -1,0 +1,71 @@
+services:
+  guacd:
+    image: guacamole/guacd:latest
+    container_name: guacd
+    restart: always
+    # guacd 不需要对外暴露端口，仅需内部通信
+    # 若需调试可临时映射 4822，生产环境禁止
+    networks:
+      - guacamole-network
+    deploy:                             # 资源限制
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+  guacamole:
+    image: guacamole/guacamole:latest
+    container_name: guacamole
+    restart: always
+    ports:
+      - "8080:8080"
+    environment:
+      GUACD_HOSTNAME: guacd          # 指向 guacd 服务名
+      GUACD_PORT: 4822
+      MYSQL_HOSTNAME: mysql 
+      MYSQL_DATABASE: guacamole
+      MYSQL_USER: guacamole
+      MYSQL_PASSWORD: ${GUACAMOLE_DB_PASSWORD} 
+      MYSQL_USER_PASSWORD_MIN_LENGTH: 8 
+      MYSQL_USER_PASSWORD_REQUIRE_MULTIPLE_CASE: true
+      MYSQL_USER_PASSWORD_REQUIRE_SYMBOL: true
+      MYSQL_USER_PASSWORD_REQUIRE_DIGIT: true
+      MYSQL_DEFAULT_MAX_CONNECTIONS_PER_USER: 1 # 允许每个用户最多多少个连接
+      MYSQL_ENFORCE_ACCESS_WINDOWS_FOR_ACTIVE_SESSIONS: false # 关闭连接是否登出用户
+    volumes:
+      - ${PWD}/config/guacamole.properties:/etc/guacamole/guacamole.properties:ro
+    networks:
+      - guacamole-network
+    depends_on:
+      mysql:
+        condition: service_healthy      # 等待数据库就绪
+      guacd:
+        condition: service_started
+  mysql:
+    image: mysql:8.0
+    container_name: mysql8
+    volumes:
+      - ${PWD}/db:/var/lib/mysql
+      - ${PWD}/initdb:/docker-entrypoint-initdb.d:ro
+    command:
+      - --max_allowed_packet=64M       # 增大允许的数据包大小
+      - --net_write_timeout=600        # 增大写入超时时间 (秒)
+      - --wait_timeout=28800           # 增大空闲连接超时时间
+      - --interactive_timeout=28800    # 增大交互式连接超时时间
+      - --character-set-server=utf8mb4 # 数据库支持中文
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: guacamole         # 自动创建数据库
+      MYSQL_USER: guacamole             # 自动创建用户
+      MYSQL_PASSWORD: ${GUACAMOLE_DB_PASSWORD}
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - guacamole-network
+networks:
+  guacamole-network:
+    driver: bridge

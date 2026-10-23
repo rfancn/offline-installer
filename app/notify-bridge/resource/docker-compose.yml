@@ -1,0 +1,20 @@
+services:
+  notify-bridge:
+    image: rfancn/notify-bridge:latest
+    container_name: notify-bridge
+    restart: unless-stopped
+    volumes:
+      # 配置只读挂载，与官方 docker run 示例一致
+      - ./config.toml:/app/config.toml:ro
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.notify-bridge.rule=Host(`${SITE_HOST}`)"
+      - "traefik.http.routers.notify-bridge.entrypoints=websecure"
+      - "traefik.http.routers.notify-bridge.tls=true"
+      - "traefik.http.services.notify-bridge.loadbalancer.server.port=8080"
+
+networks:
+  web:
+    external: true

@@ -1,0 +1,3 @@
+SITE_HOST=__SITE_HOST__
+# 直接访问模式的宿主机端口（反向代理模式不使用）
+NOTIFY_BRIDGE_PORT=__NOTIFY_BRIDGE_PORT__

@@ -1,0 +1,5 @@
+ALL ALL=(ALL) NOPASSWD: /usr/local/bin/claude
+ALL ALL=(ALL) NOPASSWD: /usr/local/bin/vscode
+ALL ALL=(ALL) NOPASSWD: /usr/bin/docker run *
+ALL ALL=(ALL) NOPASSWD: /bin/docker run *
+

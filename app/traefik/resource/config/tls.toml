@@ -1,0 +1,9 @@
+# 定义 TLS 证书列表
+[[tls.certificates]]
+  certFile = "/certs/server.crt"
+  keyFile = "/certs/server.key"
+
+# 设置为全局默认证书
+[tls.stores.default.defaultCertificate]
+  certFile = "/certs/server.crt"
+  keyFile = "/certs/server.key"

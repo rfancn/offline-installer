@@ -1,0 +1,3 @@
+MYSQL_ROOT_PASSWORD=__MYSQL_ROOT_PASSWORD__
+# 直接访问模式的宿主机端口（反向代理模式不使用）
+ZENTAO_PORT=__ZENTAO_PORT__

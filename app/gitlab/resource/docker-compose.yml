@@ -1,0 +1,39 @@
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:latest
+    container_name: gitlab
+    restart: always
+    shm_size: '256m'
+    hostname: 'git.sysummit.internal'  # 替换为您的实际IP或域名
+    networks:
+      - web
+    environment:
+      TZ: 'Asia/Shanghai'
+      GITLAB_OMNIBUS_CONFIG: |
+        # 设置外部访问地址为 HTTPS 协议
+        external_url 'https://git.sysummit.internal'
+        nginx['listen_port'] = 80             # 容器内部只监听 HTTP 80 端口
+        nginx['listen_https'] = false         # 关闭容器内部的 HTTPS
+
+        # 禁用 SSH 功能
+        sshd['enable'] = false                       # 1. 关闭容器内的 SSH 服务
+        gitlab_rails['gitlab_shell_ssh_port'] = nil  # 2. 取消页面展示 SSH 克隆地址
+        
+        # 针对低配服务器的优化（可选）
+        puma['worker_processes'] = 2
+        sidekiq['concurrency'] = 10
+    volumes:
+      - ./config:/etc/gitlab
+      - ./logs:/var/log/gitlab
+      - ./data:/var/opt/gitlab
+    labels:
+      # Traefik 路由配置：当访问git.sysummit.internal时，自动转发到 GitLab 容器
+      - "traefik.enable=true"
+      - "traefik.http.routers.gitlab.rule=Host(`git.sysummit.internal`)"
+      - "traefik.http.routers.gitlab.entrypoints=websecure"
+      - "traefik.http.routers.gitlab.tls=true"
+      - "traefik.http.services.gitlab.loadbalancer.server.port=80"
+
+networks:
+  web:
+    external: true 

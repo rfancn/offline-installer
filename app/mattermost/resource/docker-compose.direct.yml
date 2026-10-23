@@ -1,0 +1,44 @@
+services:
+  # Mattermost 应用服务
+  mattermost-app:
+    image: mattermost/mattermost-team-edition:release-10
+    container_name: mattermost-app
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ}
+      MM_SQLSETTINGS_DRIVERNAME: postgres
+      MM_SQLSETTINGS_DATASOURCE: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@mattermost-postgres:5432/mattermost?sslmode=disable&connect_timeout=10
+      MM_SERVICESETTINGS_SITEURL: ${SITE_URL}
+      MM_LOGSETTINGS_ENABLEDIAGNOSTICS: false
+    depends_on:
+      mattermost-postgres:
+        condition: service_healthy
+    volumes:
+      - ./config:/mattermost/config
+      - ./data:/mattermost/data
+      - ./logs:/mattermost/logs
+      - ./plugins:/mattermost/plugins
+      - ./client-plugins:/mattermost/client/plugins
+      - ./bleve-indexes:/mattermost/bleve-indexes
+    ports:
+      - "${MATTERMOST_PORT}:8065"
+
+  # PostgreSQL 数据库服务
+  mattermost-postgres:
+    image: postgres:17
+    container_name: mattermost-postgres17
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: mattermost
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8"
+    volumes:
+      - ./db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d mattermost"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 30s

@@ -1,0 +1,17 @@
+# dashboard.toml
+
+# 定义 HTTP 路由规则
+[http.routers.dashboard]
+  rule = "Host(`__DASH_BOARD_DOMAIN__`) && (PathPrefix(`/dashboard`) || PathPrefix(`/api`))"
+  entryPoints = ["websecure"]
+  service = "api@internal"
+  middlewares = ["traefik-dashboard-auth"]
+
+# 启用 TLS（留空表示使用全局默认证书）
+[http.routers.dashboard.tls]
+
+# 定义 Basic Auth 中间件
+[http.middlewares.traefik-dashboard-auth.basicAuth]
+  users = [
+    "__DASH_BOARD_CREDENTIAL__"
+  ]

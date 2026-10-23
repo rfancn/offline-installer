@@ -1,0 +1,18 @@
+$TTL 3600
+$ORIGIN sysummit.internal.
+@       IN      SOA     ns1.sysummit.internal. admin.sysummit.internal. (
+                        2026082401  ; Serial ← 同时更新序列号
+                        3600        ; Refresh
+                        900         ; Retry
+                        604800      ; Expire
+                        86400       ; Minimum TTL
+                        )
+@       IN      NS      ns1.sysummit.internal.
+@       IN      NS      ns2.sysummit.internal.
+ns1     IN      A       192.168.2.10
+ns2     IN      A       192.168.2.11
+app     IN      A       10.0.1.10
+db      IN      A       10.0.1.20
+cache   IN      A       10.0.1.30
+www     IN      CNAME   app.sysummit.internal.
+api     IN      CNAME   app.sysummit.internal.

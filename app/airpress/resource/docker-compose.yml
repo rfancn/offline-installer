@@ -1,0 +1,68 @@
+services:
+  airpress-server:
+    image: h1dian/airpress:latest
+    container_name: airpress-server
+    restart: always
+    environment:
+      - LOGGING_LEVEL_APP=info
+    volumes:
+      - ./conf:/app/conf
+      - ./resources:/app/resources
+      - ./upload:/app/upload
+      - ./logs:/app/logs
+    networks:
+      - web
+    depends_on:
+      airpress-mysql:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.airpress.rule=Host(`www.sysummit.internal`)"
+      - "traefik.http.routers.airpress.entrypoints=websecure"
+      - "traefik.http.routers.airpress.tls=true"
+      - "traefik.http.routers.airpress.service=airpress-svc"
+      - "traefik.http.services.airpress-svc.loadbalancer.server.port=8080"
+
+  airpress-mysql:
+    image: mysql:5.7
+    container_name: airpress-mysql57
+    volumes:
+      - ${PWD}/db:/var/lib/mysql
+    command:
+      # --- 字符集与网络基础配置 ---
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --max_allowed_packet=64M
+      - --net_write_timeout=600
+      # --- 连接与超时优化 ---
+      - --max_connections=500
+      - --wait_timeout=600
+      - --interactive_timeout=600
+      - --thread_cache_size=32
+      # --- 核心 InnoDB 读性能调优 (16G 内存专属) ---
+      - --innodb_buffer_pool_size=2G
+      - --innodb_buffer_pool_instances=8
+      - --innodb_log_file_size=1G
+      - --innodb_flush_method=O_DIRECT
+      - --innodb_stats_on_metadata=OFF
+      # --- 顺序读与扫描优化 ---
+      - --read_buffer_size=2M
+      - --read_rnd_buffer_size=4M
+      # --- 其他优化 ---
+      - --skip-name-resolve              # 禁用 DNS 解析，提升连接速度
+    environment:
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+      - MYSQL_DATABASE=airpress
+    networks:
+      - web
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s         # 每 5 秒检查一次
+      timeout: 3s          # 检查超时时间
+      retries: 10          # 最多重试 10 次
+      start_period: 30s    # 给予 30 秒的启动宽限期（MySQL 首次初始化较慢）
+
+networks:
+  web:
+    external: true
+

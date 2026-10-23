@@ -1,0 +1,33 @@
+services:
+  traefik:
+    image: traefik:v3
+    container_name: traefik
+    restart: always
+    networks:
+      - web
+    ports:
+      - "80:80"     # HTTP 端口（自动重定向到 HTTPS）
+      - "443:443"   # HTTPS 端口
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro # 监听 Docker 事件
+      - ./certs:/certs:ro                    # 挂载自签名证书目录
+      - ./config:/etc/traefik/config:ro      # 挂载包含 tls.yml 的配置目录
+    command:
+      # --- 基础与日志配置 ---
+      - "--log.level=INFO"
+      - "--api.dashboard=true"                       # 开启 Dashboard 功能
+      - "--api.insecure=false"                       # 关闭不安全的默认访问
+      # --- 入口点 (EntryPoints) 配置 ---
+      - "--entrypoints.web.address=:80"              # 定义 HTTP 入口
+      - "--entrypoints.websecure.address=:443"       # 定义 HTTPS 入口
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure" # HTTP 强制跳转 HTTPS
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      # --- 提供者 (Providers) 配置 ---
+      - "--providers.docker=true"                    # 启用 Docker 提供商
+      - "--providers.docker.exposedbydefault=false"  # 默认不暴露容器，仅暴露带 labels 的容器
+      - "--providers.file.directory=/etc/traefik/config"          # 读取证书配置文件
+      - "--providers.file.watch=true"
+
+networks:
+  web:
+    external: true 

@@ -1,4 +1,5 @@
 assets/
-
+docs/
+.playwright-mcp/
 # install.sh 首次运行时生成的服务根目录/根域名配置
 .installer.conf

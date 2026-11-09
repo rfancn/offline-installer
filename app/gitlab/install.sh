@@ -38,8 +38,23 @@ if [ "$INSTALL_MODE" = direct ]; then
     sed -i "s|__GITLAB_EXTERNAL_URL__|$(sed_escape "http://${DIRECT_HOST}:${DIRECT_PORT}")|g" "$TARGET_ENV_FILE"
 else
     require_root_domain || exit 1
+    # 子域名前缀默认 git；校验为合法 DNS 标签（小写字母、数字、连字符）
+    GITLAB_SUBDOMAIN="git"
+    while true; do
+        printf "请输入 GitLab 子域名前缀 [%s]: " "$GITLAB_SUBDOMAIN"
+        read -r input_prefix || { printf "\n❌ 输入已结束（EOF），已中止。\n" >&2; exit 1; }
+        input_prefix="${input_prefix:-$GITLAB_SUBDOMAIN}"
+        case "$input_prefix" in
+            -*|*-|*[!a-z0-9-]*)
+                printf "❌ 前缀只能包含小写字母、数字和连字符，且不能以连字符开头或结尾。\n" >&2
+                continue ;;
+        esac
+        GITLAB_SUBDOMAIN="$input_prefix"
+        break
+    done
+    GITLAB_DOMAIN="${GITLAB_SUBDOMAIN}.${ROOT_DOMAIN}"
     cp resource/docker-compose.yml "$COMPOSE_FILE"
-    sed -i "s|git\.sysummit\.internal|$(sed_escape "git.${ROOT_DOMAIN}")|g" "$COMPOSE_FILE"
+    sed -i "s|git\.sysummit\.internal|$(sed_escape "$GITLAB_DOMAIN")|g" "$COMPOSE_FILE"
 fi
 
 ###############
@@ -85,7 +100,7 @@ if [ "$INSTALL_MODE" = direct ]; then
     open_firewall_ports "$DIRECT_PORT/tcp"
     printf "访问地址: http://%s:%s\n" "$DIRECT_HOST" "$DIRECT_PORT"
 else
-    printf "访问地址: https://git.%s（请确认域名已解析到本机并信任 mkcert 根证书）\n" "$ROOT_DOMAIN"
+    printf "访问地址: https://%s（请确认域名已解析到本机并信任 mkcert 根证书）\n" "$GITLAB_DOMAIN"
 fi
 
 echo "✅ $INSTALL_NAME 安装完成！"

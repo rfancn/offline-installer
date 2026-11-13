@@ -1,10 +1,8 @@
 services:
   rustfs:
-    image: rustfs/rustfs:1.0.1
+    image: rustfs/rustfs:latest
     container_name: rustfs
     restart: unless-stopped
-    ports:
-      - "${RUSTFS_S3_PORT}:9000"
     networks:
       - web
     volumes:

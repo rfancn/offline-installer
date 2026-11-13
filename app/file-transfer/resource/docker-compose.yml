@@ -1,0 +1,24 @@
+services:
+  ft-server:
+    image: rfancn/file-transfer:latest
+    container_name: ft-server
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      # 配置、密钥、日志与上游 docker-compose 保持一致
+      - ./config:/etc/file-transfer
+      - ./secrets:/app/secrets
+      - ./logs:/var/log/file-transfer
+    networks:
+      - web
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.file-transfer.rule=Host(`${SITE_HOST}`)"
+      - "traefik.http.routers.file-transfer.entrypoints=websecure"
+      - "traefik.http.routers.file-transfer.tls=true"
+      - "traefik.http.services.file-transfer.loadbalancer.server.port=8080"
+
+networks:
+  web:
+    external: true

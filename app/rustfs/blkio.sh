@@ -14,6 +14,7 @@ BLKIO_STATIC_WRITE_IOPS=80
 
 BLKIO_DEVICE=""
 BLKIO_PROBE_FILE=""
+BLKIO_FIO_DIR=""
 BLKIO_PEAK_IS_STATIC=0
 BLKIO_PEAK_READ_MIB=0
 BLKIO_PEAK_WRITE_MIB=0
@@ -26,10 +27,13 @@ BLKIO_WRITE_LIMIT_MIB=0
 BLKIO_READ_LIMIT_IOPS=0
 BLKIO_WRITE_LIMIT_IOPS=0
 
-# 删除探测临时文件；可重复调用
+# 删除探测临时文件与 fio JSON 目录；可重复调用
 blkio_cleanup() {
     if [ -n "$BLKIO_PROBE_FILE" ] && [ -f "$BLKIO_PROBE_FILE" ]; then
         rm -f "$BLKIO_PROBE_FILE"
+    fi
+    if [ -n "$BLKIO_FIO_DIR" ] && [ -d "$BLKIO_FIO_DIR" ]; then
+        rm -rf "$BLKIO_FIO_DIR"
     fi
 }
 
@@ -87,12 +91,14 @@ except Exception:
 PY
 }
 
-# 无 jq/python3 时的最小解析：依赖 fio 默认的缩进 JSON；
-# 目标段必含请求的指标，因此 indir 置位后不在段间复位
+# 无 jq/python3 时的最小解析：依赖 fio 默认的缩进 JSON。
+# 数据段按行首键名识别，避免匹配 job options 中的 "rw" : "write"。
 blkio_fio_value_awk() {
     awk -v dir="\"$2\"" -v metric="\"$3\"" '
         index($0, "\"jobs\"") { injobs = 1 }
-        injobs && index($0, dir) { indir = 1 }
+        injobs && $0 ~ "^[ \t]*\"(read|write|trim|sync)\"[ \t]*:" {
+            indir = ($0 ~ ("^[ \t]*" dir "[ \t]*:"))
+        }
         indir && match($0, metric "[ \t]*:[ \t]*[0-9.]+") {
             value = substr($0, RSTART, RLENGTH)
             sub(/^[^:]*:[ \t]*/, "", value)
@@ -203,9 +209,9 @@ blkio_dd_random_iops() {
     for ((i = 0; i < ops; i++)); do
         off=$(( (RANDOM << 15 | RANDOM) % blocks ))
         if [ "$mode" = read ]; then
-            dd if="$file" of=/dev/null bs=4k count=1 skip="$off" iflag=direct status=none 2>/dev/null || return 1
+            dd if="$file" of=/dev/null bs=4k count=1 skip="$off" iflag=direct 2>/dev/null || return 1
         else
-            dd if=/dev/zero of="$file" bs=4k count=1 seek="$off" oflag=direct conv=notrunc status=none 2>/dev/null || return 1
+            dd if=/dev/zero of="$file" bs=4k count=1 seek="$off" oflag=direct conv=notrunc 2>/dev/null || return 1
         fi
     done
     end=$(blkio_now_ns) || return 1
@@ -214,9 +220,9 @@ blkio_dd_random_iops() {
     base_start=$(blkio_now_ns) || return 1
     for ((i = 0; i < base_ops; i++)); do
         if [ "$mode" = read ]; then
-            dd if="$file" of=/dev/null bs=4k count=1 skip=0 iflag=direct status=none 2>/dev/null || return 1
+            dd if="$file" of=/dev/null bs=4k count=1 skip=0 iflag=direct 2>/dev/null || return 1
         else
-            dd if=/dev/zero of="$file" bs=4k count=1 seek=0 oflag=direct conv=notrunc status=none 2>/dev/null || return 1
+            dd if=/dev/zero of="$file" bs=4k count=1 seek=0 oflag=direct conv=notrunc 2>/dev/null || return 1
         fi
     done
     end=$(blkio_now_ns) || return 1
@@ -236,9 +242,9 @@ blkio_seq_mibs() {
     local file="$1" size_mib="$2" mode="$3" start_ns end_ns elapsed_ns start_cs end_cs elapsed_cs
     if start_ns=$(blkio_now_ns); then
         if [ "$mode" = read ]; then
-            dd if="$file" of=/dev/null bs=1M count="$size_mib" iflag=direct status=none 2>/dev/null || return 1
+            dd if="$file" of=/dev/null bs=1M count="$size_mib" iflag=direct 2>/dev/null || return 1
         else
-            dd if=/dev/zero of="$file" bs=1M count="$size_mib" oflag=direct conv=fsync status=none 2>/dev/null || return 1
+            dd if=/dev/zero of="$file" bs=1M count="$size_mib" oflag=direct conv=fsync 2>/dev/null || return 1
         fi
         end_ns=$(blkio_now_ns) || return 1
         elapsed_ns=$((end_ns - start_ns))
@@ -249,9 +255,9 @@ blkio_seq_mibs() {
 
     start_cs=$(blkio_now_cs)
     if [ "$mode" = read ]; then
-        dd if="$file" of=/dev/null bs=1M count="$size_mib" iflag=direct status=none 2>/dev/null || return 1
+        dd if="$file" of=/dev/null bs=1M count="$size_mib" iflag=direct 2>/dev/null || return 1
     else
-        dd if=/dev/zero of="$file" bs=1M count="$size_mib" oflag=direct conv=fsync status=none 2>/dev/null || return 1
+        dd if=/dev/zero of="$file" bs=1M count="$size_mib" oflag=direct conv=fsync 2>/dev/null || return 1
     fi
     end_cs=$(blkio_now_cs)
     elapsed_cs=$((end_cs - start_cs))
@@ -293,25 +299,27 @@ blkio_measure() {
     BLKIO_PEAK_WRITE_MIB=0
     BLKIO_PEAK_READ_IOPS=0
     BLKIO_PEAK_WRITE_IOPS=0
+    BLKIO_FIO_DIR=""
     size_mib=$(blkio_probe_size_mib) || return 1
     file="$SERVICE_DIR/data/.blkio-probe"
     BLKIO_PROBE_FILE="$file"
 
     printf "🔍 正在测速（预计 40–60 秒，测试文件 %s MiB）...\n" "$size_mib"
     rm -f "$file"
-    dd if=/dev/zero of="$file" bs=1M count="$size_mib" oflag=direct conv=fsync status=none 2>/dev/null || {
+    dd if=/dev/zero of="$file" bs=1M count="$size_mib" oflag=direct conv=fsync 2>/dev/null || {
         blkio_cleanup
         return 1
     }
 
     if command -v fio >/dev/null 2>&1; then
-        if tmpdir=$(mktemp -d); then
+        if tmpdir=$(mktemp -d "$SERVICE_DIR/data/.blkio-fio.XXXXXX"); then
+            BLKIO_FIO_DIR="$tmpdir"
             if blkio_peak_from_fio "$file" "$tmpdir"; then
-                rm -rf "$tmpdir"
                 blkio_cleanup
                 return 0
             fi
             rm -rf "$tmpdir"
+            BLKIO_FIO_DIR=""
             printf "⚠️  fio 测速失败，改用 dd 估算。\n" >&2
         else
             printf "⚠️  无法创建 fio 临时目录，改用 dd 估算。\n" >&2
@@ -428,11 +436,15 @@ blkio_ask_limits() {
     return 0
 }
 
-# 删除模板中的 blkio 段（标记不成对或无标记时不做任何事）
+# 删除模板中的 blkio 段；无标记时 no-op，标记不成对时返回 1
 blkio_remove_config() {
-    local compose="$1"
-    grep -q '^[[:space:]]*# __BLKIO_BEGIN__$' "$compose" || return 0
-    grep -q '^[[:space:]]*# __BLKIO_END__$' "$compose" || return 0
+    local compose="$1" has_begin=0 has_end=0
+    grep -q '^[[:space:]]*# __BLKIO_BEGIN__$' "$compose" && has_begin=1
+    grep -q '^[[:space:]]*# __BLKIO_END__$' "$compose" && has_end=1
+    if [ "$has_begin" -eq 0 ] && [ "$has_end" -eq 0 ]; then
+        return 0
+    fi
+    [ "$has_begin" -eq 1 ] && [ "$has_end" -eq 1 ] || return 1
     sed -i '/^[[:space:]]*# __BLKIO_BEGIN__$/,/^[[:space:]]*# __BLKIO_END__$/d' "$compose" || return 1
 }
 
@@ -447,7 +459,21 @@ blkio_render_config() {
         -e "s|__BLKIO_WRITE_IOPS__|$BLKIO_WRITE_LIMIT_IOPS|g" \
         "$compose" || return 1
     sed -i -e '/^[[:space:]]*# __BLKIO_BEGIN__$/d' -e '/^[[:space:]]*# __BLKIO_END__$/d' "$compose" || return 1
+    if grep -q '__BLKIO_' "$compose"; then
+        return 1
+    fi
     return 0
+}
+
+# 中断时清理探测文件、恢复调用方 trap，然后退出
+blkio_abort() {
+    local code="$1"
+    blkio_cleanup
+    trap - EXIT INT TERM HUP
+    if [ -n "${saved_traps:-}" ]; then
+        eval "$saved_traps"
+    fi
+    exit "$code"
 }
 
 # 安装流程入口：成功 0；无法限速 0（已删除配置）；EOF/写入失败 2
@@ -473,9 +499,9 @@ apply_blkio_limits() {
 
     saved_traps=$(trap -p EXIT INT TERM HUP)
     trap 'blkio_cleanup' EXIT
-    trap 'blkio_cleanup; exit 130' INT
-    trap 'blkio_cleanup; exit 143' TERM
-    trap 'blkio_cleanup; exit 129' HUP
+    trap 'blkio_abort 130' INT
+    trap 'blkio_abort 143' TERM
+    trap 'blkio_abort 129' HUP
     if ! blkio_measure; then
         printf "⚠️  测速不可用，使用静态保守值。\n"
         blkio_use_static_peaks

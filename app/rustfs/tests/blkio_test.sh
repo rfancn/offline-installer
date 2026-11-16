@@ -105,6 +105,10 @@ cat > "$TMP_DIR/fio.json" <<'EOF'
         {
             "jobname" : "rustfs-randread",
             "groupid" : 0,
+            "job options" : {
+                "rw" : "write",
+                "bs" : "1M"
+            },
             "error" : 0,
             "read" : {
                 "io_bytes" : 4294967296,
@@ -141,6 +145,30 @@ assert_eq "解析入口读带宽" "421888" "$(blkio_fio_value "$TMP_DIR/fio.json
 assert_eq "解析入口读 IOPS" "1024.5" "$(blkio_fio_value "$TMP_DIR/fio.json" read iops)"
 assert_eq "解析入口零值" "0" "$(blkio_fio_value "$TMP_DIR/fio.json" write bw)"
 
+cat > "$TMP_DIR/fio-write.json" <<'EOF'
+{
+    "jobs" : [
+        {
+            "jobname" : "rustfs-seqwrite",
+            "job options" : {
+                "rw" : "write",
+                "bs" : "1M"
+            },
+            "read" : {
+                "bw" : 111,
+                "iops" : 0
+            },
+            "write" : {
+                "bw" : 222,
+                "iops" : 0
+            }
+        }
+    ]
+}
+EOF
+assert_eq "含 job options 时读带宽正确" "111" "$(blkio_fio_value_awk "$TMP_DIR/fio-write.json" read bw)"
+assert_eq "含 job options 时写带宽正确" "222" "$(blkio_fio_value_awk "$TMP_DIR/fio-write.json" write bw)"
+
 cat > "$TMP_DIR/fio-bad.json" <<'EOF'
 {
     "jobs" : [
@@ -168,6 +196,40 @@ assert_eq "回退到 python3 解析读带宽" "421888" \
     "$(PATH="$TMP_DIR/nojq:$PATH" blkio_fio_value "$TMP_DIR/fio.json" read bw)"
 assert_eq "回退到 awk 解析读带宽" "421888" \
     "$(PATH="$TMP_DIR/nojqpy:$PATH" blkio_fio_value "$TMP_DIR/fio.json" read bw)"
+
+# ---- fio 执行路径 ----
+mkdir -p "$TMP_DIR/fakefio" "$TMP_DIR/fio-json"
+cat > "$TMP_DIR/fakefio/fio" <<'EOF'
+#!/bin/sh
+out="" rw=""
+for arg in "$@"; do
+    case "$arg" in
+        --output=*) out="${arg#--output=}" ;;
+        --rw=*) rw="${arg#--rw=}" ;;
+    esac
+done
+case "$rw" in
+    read)
+        printf '{"jobs":[{"read":{"bw":421888,"iops":1024.5},"write":{"bw":0,"iops":0}}]}\n' > "$out" ;;
+    write)
+        printf '{"jobs":[{"read":{"bw":0,"iops":0},"write":{"bw":200704,"iops":512}}]}\n' > "$out" ;;
+    randread)
+        printf '{"jobs":[{"read":{"bw":0,"iops":1024.5},"write":{"bw":0,"iops":0}}]}\n' > "$out" ;;
+    randwrite)
+        printf '{"jobs":[{"read":{"bw":0,"iops":0},"write":{"bw":0,"iops":512}}]}\n' > "$out" ;;
+    *) exit 1 ;;
+esac
+EOF
+chmod +x "$TMP_DIR/fakefio/fio"
+: > "$TMP_DIR/fio-probe"
+fio_peak_with_fake() {
+    PATH="$TMP_DIR/fakefio:$PATH" blkio_peak_from_fio "$TMP_DIR/fio-probe" "$TMP_DIR/fio-json"
+}
+assert_true "fio 四组峰值提取成功" fio_peak_with_fake
+assert_eq "fio 顺序读 MiB/s" "412" "$BLKIO_PEAK_READ_MIB"
+assert_eq "fio 顺序写 MiB/s" "196" "$BLKIO_PEAK_WRITE_MIB"
+assert_eq "fio 随机读 IOPS" "1024" "$BLKIO_PEAK_READ_IOPS"
+assert_eq "fio 随机写 IOPS" "512" "$BLKIO_PEAK_WRITE_IOPS"
 
 # ---- 设备探测与测速纯逻辑 ----
 mkdir -p "$TMP_DIR/fakebin" "$TMP_DIR/probe-data"
@@ -379,6 +441,7 @@ services:
 EOF
 blkio_remove_config "$TMP_DIR/compose-unpaired.yml"
 assert_file_contains "标记不成对时不删除" "$TMP_DIR/compose-unpaired.yml" "keep: yes"
+assert_false "标记不成对返回失败" blkio_remove_config "$TMP_DIR/compose-unpaired.yml"
 
 cat > "$TMP_DIR/compose-remove.yml" <<'EOF'
 services:
@@ -392,6 +455,31 @@ EOF
 blkio_remove_config "$TMP_DIR/compose-remove.yml"
 assert_file_not_contains "blkio 段已删除" "$TMP_DIR/compose-remove.yml" "blkio_config"
 assert_file_contains "其余配置保留" "$TMP_DIR/compose-remove.yml" "image: rustfs/rustfs:latest"
+
+cat > "$TMP_DIR/compose-extra.yml" <<'EOF'
+services:
+  rustfs:
+    # __BLKIO_BEGIN__
+    blkio_config:
+      weight: 500
+    # __BLKIO_END__
+    note: __BLKIO_UNKNOWN__
+EOF
+assert_false "渲染后仍有占位符时失败" blkio_render_config "$TMP_DIR/compose-extra.yml"
+
+# ---- 真实模板占位符 ----
+for tpl in "$TEST_DIR/../resource/docker-compose.yml" "$TEST_DIR/../resource/docker-compose.direct.yml"; do
+    name=$(basename "$tpl")
+    cp "$tpl" "$TMP_DIR/real-$name"
+    assert_eq "真实模板占位符数量: $name" "10" "$(grep -c '__BLKIO_' "$TMP_DIR/real-$name")"
+    BLKIO_DEVICE=/dev/md0
+    BLKIO_READ_LIMIT_MIB=329
+    BLKIO_WRITE_LIMIT_MIB=308
+    BLKIO_READ_LIMIT_IOPS=1608
+    BLKIO_WRITE_LIMIT_IOPS=580
+    blkio_render_config "$TMP_DIR/real-$name"
+    assert_file_not_contains "真实模板渲染无残留: $name" "$TMP_DIR/real-$name" "__BLKIO_"
+done
 
 # ---- apply 编排 ----
 run_apply_case() {
@@ -427,6 +515,43 @@ assert_eq "渲染失败时中止" "rc=2 log=resolve,measure,ask,render trap=" \
     "$(RENDER_RC=1 run_apply_case "$apply_yml")"
 assert_eq "成功路径不残留 trap" "rc=0 log=resolve,measure,ask,render trap=" \
     "$(run_apply_case "$apply_yml")"
+
+# ---- 信号中断清理 ----
+REPO_ROOT="$(cd "$TEST_DIR/../../.." && pwd)"
+mkdir -p "$TMP_DIR/data"
+: > "$TMP_DIR/compose.yml"
+mkfifo "$TMP_DIR/int-fifo"
+cat > "$TMP_DIR/int-run.sh" <<EOF
+#!/bin/bash
+set -u
+. "$REPO_ROOT/script/common.sh"
+. "$REPO_ROOT/app/rustfs/blkio.sh"
+SERVICE_DIR="$TMP_DIR"
+resolve_blkio_device() { BLKIO_DEVICE=/dev/null; return 0; }
+blkio_measure() {
+    BLKIO_PROBE_FILE="\$SERVICE_DIR/data/.blkio-probe"
+    : > "\$BLKIO_PROBE_FILE"
+    : > "\$SERVICE_DIR/int-ready"
+    read -r _ < "\$SERVICE_DIR/int-fifo"
+}
+blkio_ask_limits() { :; }
+blkio_render_config() { :; }
+apply_blkio_limits "\$SERVICE_DIR/compose.yml"
+EOF
+# 开启 job control，使后台脚本不继承被忽略的 SIGINT，trap 才能生效
+set -m
+bash "$TMP_DIR/int-run.sh" >"$TMP_DIR/int.out" 2>&1 &
+int_pid=$!
+set +m
+for _ in $(seq 1 100); do
+    [ -f "$TMP_DIR/int-ready" ] && break
+    sleep 0.05
+done
+kill -INT "$int_pid"
+wait "$int_pid"
+int_rc=$?
+assert_eq "中断退出码 130" "130" "$int_rc"
+assert_false "中断后探测文件被清理" [ -f "$TMP_DIR/data/.blkio-probe" ]
 
 printf -- "----------------------------------------\n"
 printf "通过 %d，失败 %d\n" "$PASS" "$FAIL"

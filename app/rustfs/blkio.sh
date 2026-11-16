@@ -449,3 +449,50 @@ blkio_render_config() {
     sed -i -e '/^[[:space:]]*# __BLKIO_BEGIN__$/d' -e '/^[[:space:]]*# __BLKIO_END__$/d' "$compose" || return 1
     return 0
 }
+
+# 安装流程入口：成功 0；无法限速 0（已删除配置）；EOF/写入失败 2
+apply_blkio_limits() {
+    local compose="$1" rc saved_traps
+    [ -f "$compose" ] || {
+        printf "❌ compose 文件不存在: %s\n" "$compose" >&2
+        return 2
+    }
+    BLKIO_PEAK_IS_STATIC=0
+
+    resolve_blkio_device
+    rc=$?
+    if [ "$rc" -eq 2 ]; then
+        return 2
+    elif [ "$rc" -ne 0 ]; then
+        if ! blkio_remove_config "$compose"; then
+            printf "❌ 无法移除 blkio 配置段: %s\n" "$compose" >&2
+            return 2
+        fi
+        return 0
+    fi
+
+    saved_traps=$(trap -p EXIT INT TERM HUP)
+    trap 'blkio_cleanup' EXIT
+    trap 'blkio_cleanup; exit 130' INT
+    trap 'blkio_cleanup; exit 143' TERM
+    trap 'blkio_cleanup; exit 129' HUP
+    if ! blkio_measure; then
+        printf "⚠️  测速不可用，使用静态保守值。\n"
+        blkio_use_static_peaks
+    fi
+    blkio_cleanup
+    trap - EXIT INT TERM HUP
+    if [ -n "$saved_traps" ]; then
+        eval "$saved_traps"
+    fi
+
+    blkio_ask_limits || return 2
+    blkio_render_config "$compose" || {
+        printf "❌ 写入 blkio 配置失败: %s\n" "$compose" >&2
+        return 2
+    }
+    printf "✅ 已写入 blkio 限速：读 %smib、写 %smib、读 %s IOPS、写 %s IOPS\n" \
+        "$BLKIO_READ_LIMIT_MIB" "$BLKIO_WRITE_LIMIT_MIB" \
+        "$BLKIO_READ_LIMIT_IOPS" "$BLKIO_WRITE_LIMIT_IOPS"
+    return 0
+}

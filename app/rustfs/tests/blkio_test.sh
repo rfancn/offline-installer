@@ -393,6 +393,41 @@ blkio_remove_config "$TMP_DIR/compose-remove.yml"
 assert_file_not_contains "blkio 段已删除" "$TMP_DIR/compose-remove.yml" "blkio_config"
 assert_file_contains "其余配置保留" "$TMP_DIR/compose-remove.yml" "image: rustfs/rustfs:latest"
 
+# ---- apply 编排 ----
+run_apply_case() {
+    local compose="$1" log="$TMP_DIR/apply.log"
+    : > "$log"
+    (
+        # 清除从测试主进程继承的 EXIT trap，避免 apply 恢复 trap 后提前删除 TMP_DIR
+        trap - EXIT
+        resolve_blkio_device() { printf 'resolve\n' >> "$log"; return "${RESOLVE_RC:-0}"; }
+        blkio_measure() { printf 'measure\n' >> "$log"; return "${MEASURE_RC:-0}"; }
+        blkio_use_static_peaks() { printf 'static\n' >> "$log"; }
+        blkio_ask_limits() { printf 'ask\n' >> "$log"; return "${ASK_RC:-0}"; }
+        blkio_render_config() { printf 'render\n' >> "$log"; return "${RENDER_RC:-0}"; }
+        blkio_remove_config() { printf 'remove\n' >> "$log"; return "${REMOVE_RC:-0}"; }
+        blkio_cleanup() { :; }
+        apply_blkio_limits "$compose" >/dev/null 2>&1
+        printf 'rc=%s log=%s trap=%s\n' "$?" "$(paste -sd, "$log")" "$(trap -p INT)"
+    )
+}
+apply_yml="$TMP_DIR/apply.yml"
+: > "$apply_yml"
+assert_eq "compose 缺失时中止" "rc=2 log= trap=" \
+    "$(run_apply_case "$TMP_DIR/missing.yml")"
+assert_eq "resolve EOF 时中止且不测速" "rc=2 log=resolve trap=" \
+    "$(RESOLVE_RC=2 run_apply_case "$apply_yml")"
+assert_eq "无法限速时删除配置并成功返回" "rc=0 log=resolve,remove trap=" \
+    "$(RESOLVE_RC=1 run_apply_case "$apply_yml")"
+assert_eq "测速失败时走静态值并继续" "rc=0 log=resolve,measure,static,ask,render trap=" \
+    "$(MEASURE_RC=1 run_apply_case "$apply_yml")"
+assert_eq "确认阶段 EOF 中止且不渲染" "rc=2 log=resolve,measure,ask trap=" \
+    "$(ASK_RC=2 run_apply_case "$apply_yml")"
+assert_eq "渲染失败时中止" "rc=2 log=resolve,measure,ask,render trap=" \
+    "$(RENDER_RC=1 run_apply_case "$apply_yml")"
+assert_eq "成功路径不残留 trap" "rc=0 log=resolve,measure,ask,render trap=" \
+    "$(run_apply_case "$apply_yml")"
+
 printf -- "----------------------------------------\n"
 printf "通过 %d，失败 %d\n" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

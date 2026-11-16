@@ -10,6 +10,14 @@ if [ ! -f "$COMMON_SCRIPT" ]; then
 fi
 
 . "$COMMON_SCRIPT"
+
+BLKIO_SCRIPT="${SCRIPT_PATH}/blkio.sh"
+if [ ! -f "$BLKIO_SCRIPT" ]; then
+    printf "❌ 致命错误: 找不到 I/O 限速库 %s\n" "$BLKIO_SCRIPT"
+    exit 1
+fi
+. "$BLKIO_SCRIPT"
+
 load_common || exit 1
 
 init_service || exit 1
@@ -102,6 +110,12 @@ else
     sed -i "s|__S3_HOST__|$(sed_escape "$S3_HOST")|g" "$SERVICE_DIR/docker-compose.yml"
     sed -i "s|__CONSOLE_HOST__|$(sed_escape "$CONSOLE_HOST")|g" "$SERVICE_DIR/docker-compose.yml"
     S3_ENDPOINT="https://${S3_HOST}"
+fi
+
+# 按数据盘实测能力写入 blkio 限速；无法限速时自动删除模板中的配置段
+if ! apply_blkio_limits "$SERVICE_DIR/docker-compose.yml"; then
+    printf "❌ 已中止安装。如需重试，请先删除 %s 后重新运行。\n" "$SERVICE_DIR" >&2
+    exit 1
 fi
 
 # 渲染 .env

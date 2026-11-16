@@ -16,3 +16,19 @@ services:
       - RUSTFS_ADDRESS=0.0.0.0:9000
       - RUSTFS_CONSOLE_ENABLE=true
       - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+    # __BLKIO_BEGIN__
+    blkio_config:
+      weight: 500
+      device_read_bps:
+        - path: __BLKIO_DEVICE__
+          rate: "__BLKIO_READ_BPS__"
+      device_write_bps:
+        - path: __BLKIO_DEVICE__
+          rate: "__BLKIO_WRITE_BPS__"
+      device_read_iops:
+        - path: __BLKIO_DEVICE__
+          rate: __BLKIO_READ_IOPS__
+      device_write_iops:
+        - path: __BLKIO_DEVICE__
+          rate: __BLKIO_WRITE_IOPS__
+    # __BLKIO_END__

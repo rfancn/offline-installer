@@ -35,8 +35,8 @@ init_service || exit 1
 
 echo "🚀 开始将服务安装到: $SERVICE_DIR"
 
-# 创建持久化目录：配置、密钥、日志
-for d in config logs secrets; do
+# 创建持久化目录：配置、日志、密钥、IAM 策略
+for d in config logs secrets policy; do
     mkdir -p "$SERVICE_DIR/$d" || {
         printf "❌ 致命错误: 创建目录失败: %s/%s\n" "$SERVICE_DIR" "$d"
         exit 1
@@ -96,6 +96,26 @@ sed -i "s|__UPLOAD_SECRET__|$(sed_escape "$UPLOAD_SECRET")|g" "$CONFIG_FILE"
 # 配置中包含认证密钥，仅允许当前用户读写
 chmod 600 "$CONFIG_FILE"
 
+# ================= IAM 策略 =================
+# 策略目录只读挂载到容器 /etc/file-transfer/policy；修改后需重启 ft-server 并执行 ft-admin init 生效
+for f in resource/policy/*.json; do
+    [ -e "$f" ] || continue
+    dst="$SERVICE_DIR/policy/$(basename "$f")"
+    if [ -e "$dst" ]; then
+        printf "ℹ️  保留已存在的策略文件: %s\n" "$dst"
+    else
+        cp "$f" "$dst" || {
+            printf "❌ 致命错误: 无法写入 %s\n" "$dst"
+            exit 1
+        }
+    fi
+done
+# 挂载空目录会覆盖镜像内置策略，导致 ft-server 启动失败
+if ! ls "$SERVICE_DIR/policy"/*.json >/dev/null 2>&1; then
+    printf "❌ 致命错误: 策略目录中没有 JSON 文件: %s\n" "$SERVICE_DIR/policy"
+    exit 1
+fi
+
 # ================= 安装 compose 与环境变量 =================
 cp "resource/$COMPOSE_SRC" "$SERVICE_DIR/docker-compose.yml"
 
@@ -123,5 +143,7 @@ fi
 printf "🔐 token_secret / upload_secret 已随机生成: %s\n" "$CONFIG_FILE"
 printf "👤 首次启动将生成管理员账号 admin，密码见 %s/secrets/user.json 或容器日志。\n" "$SERVICE_DIR"
 printf "🔗 RustFS 地址: %s\n" "$S3_ENDPOINT"
+printf "📜 IAM 策略目录: %s（只读挂载到容器 /etc/file-transfer/policy）\n" "$SERVICE_DIR/policy"
+printf "   修改策略后：cd %s && docker compose restart ft-server，再在管理端执行 ft-admin init 使策略生效。\n" "$SERVICE_DIR"
 printf "下一步：cd %s && docker compose up -d\n" "$SERVICE_DIR"
 printf "==========================================\n"

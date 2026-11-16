@@ -15,11 +15,37 @@ services:
       - RUSTFS_ADDRESS=0.0.0.0:9000
       - RUSTFS_CONSOLE_ENABLE=true
       - RUSTFS_CONSOLE_ADDRESS=0.0.0.0:9001
+    # __BLKIO_BEGIN__
+    blkio_config:
+      weight: 500
+      device_read_bps:
+        - path: __BLKIO_DEVICE__
+          rate: "__BLKIO_READ_BPS__"
+      device_write_bps:
+        - path: __BLKIO_DEVICE__
+          rate: "__BLKIO_WRITE_BPS__"
+      device_read_iops:
+        - path: __BLKIO_DEVICE__
+          rate: __BLKIO_READ_IOPS__
+      device_write_iops:
+        - path: __BLKIO_DEVICE__
+          rate: __BLKIO_WRITE_IOPS__
+    # __BLKIO_END__
     labels:
       - "traefik.enable=true"
+      # S3 API：不挂载 buffering 中间件，Traefik 默认流式转发，无请求体大小上限
+      - "traefik.http.routers.rustfs-s3.rule=Host(`__S3_HOST__`)"
+      - "traefik.http.routers.rustfs-s3.entrypoints=websecure"
+      - "traefik.http.routers.rustfs-s3.tls=true"
+      # 同一容器有两个 service，router 必须显式指定，否则 Traefik 无法自动关联
+      - "traefik.http.routers.rustfs-s3.service=rustfs-s3"
+      - "traefik.http.services.rustfs-s3.loadbalancer.server.port=9000"
+      # S3 SigV4 依赖 Host 头，保持默认的透传
+      - "traefik.http.services.rustfs-s3.loadbalancer.passhostheader=true"
       - "traefik.http.routers.rustfs-console.rule=Host(`__CONSOLE_HOST__`)"
       - "traefik.http.routers.rustfs-console.entrypoints=websecure"
       - "traefik.http.routers.rustfs-console.tls=true"
+      - "traefik.http.routers.rustfs-console.service=rustfs-console"
       - "traefik.http.services.rustfs-console.loadbalancer.server.port=9001"
 
 networks:

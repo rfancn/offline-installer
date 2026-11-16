@@ -66,6 +66,78 @@ blkio_cleanup
 assert_false "cleanup 删除探测文件" [ -f "$probe" ]
 assert_true "cleanup 可重复调用" blkio_cleanup
 
+# ---- fio JSON 解析 ----
+cat > "$TMP_DIR/fio.json" <<'EOF'
+{
+    "fio version" : "fio-3.35",
+    "jobs" : [
+        {
+            "jobname" : "rustfs-randread",
+            "groupid" : 0,
+            "error" : 0,
+            "read" : {
+                "io_bytes" : 4294967296,
+                "bw" : 421888,
+                "bw_min" : 400000,
+                "bw_max" : 430000,
+                "bw_bytes" : 432013312,
+                "iops" : 1024.5,
+                "iops_min" : 900.0,
+                "iops_max" : 1100.0
+            },
+            "write" : {
+                "io_bytes" : 0,
+                "bw" : 0,
+                "bw_bytes" : 0,
+                "iops" : 0
+            },
+            "trim" : {
+                "io_bytes" : 0,
+                "bw" : 0,
+                "iops" : 0
+            },
+            "sync" : {
+                "total_ios" : 0
+            }
+        }
+    ]
+}
+EOF
+assert_eq "awk 解析读带宽" "421888" "$(blkio_fio_value_awk "$TMP_DIR/fio.json" read bw)"
+assert_eq "awk 解析读 IOPS" "1024.5" "$(blkio_fio_value_awk "$TMP_DIR/fio.json" read iops)"
+assert_eq "awk 解析写带宽" "0" "$(blkio_fio_value_awk "$TMP_DIR/fio.json" write bw)"
+assert_eq "解析入口读带宽" "421888" "$(blkio_fio_value "$TMP_DIR/fio.json" read bw)"
+assert_eq "解析入口读 IOPS" "1024.5" "$(blkio_fio_value "$TMP_DIR/fio.json" read iops)"
+assert_eq "解析入口零值" "0" "$(blkio_fio_value "$TMP_DIR/fio.json" write bw)"
+
+cat > "$TMP_DIR/fio-bad.json" <<'EOF'
+{
+    "jobs" : [
+        {
+            "read" : {
+                "bw" : "abc",
+                "iops" : null
+            }
+        }
+    ]
+}
+EOF
+assert_false "缺失文件返回失败" blkio_fio_value "$TMP_DIR/nope.json" read bw
+assert_false "缺失指标返回失败" blkio_fio_value "$TMP_DIR/fio.json" read missing
+assert_false "字符串指标返回失败" blkio_fio_value "$TMP_DIR/fio-bad.json" read bw
+assert_false "null 指标返回失败" blkio_fio_value "$TMP_DIR/fio-bad.json" read iops
+
+# PATH 垫片：屏蔽 jq 或 jq+python3，验证回退路径
+mkdir -p "$TMP_DIR/nojq" "$TMP_DIR/nojqpy"
+printf '#!/bin/sh\nexit 127\n' > "$TMP_DIR/nojq/jq"
+printf '#!/bin/sh\nexit 127\n' > "$TMP_DIR/nojqpy/jq"
+printf '#!/bin/sh\nexit 127\n' > "$TMP_DIR/nojqpy/python3"
+chmod +x "$TMP_DIR/nojq/jq" "$TMP_DIR/nojqpy/jq" "$TMP_DIR/nojqpy/python3"
+assert_eq "回退到 python3 解析读带宽" "421888" \
+    "$(PATH="$TMP_DIR/nojq:$PATH" blkio_fio_value "$TMP_DIR/fio.json" read bw)"
+assert_eq "回退到 awk 解析读带宽" "421888" \
+    "$(PATH="$TMP_DIR/nojqpy:$PATH" blkio_fio_value "$TMP_DIR/fio.json" read bw)"
+
 printf -- "----------------------------------------\n"
 printf "通过 %d，失败 %d\n" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

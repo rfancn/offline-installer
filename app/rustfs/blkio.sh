@@ -59,3 +59,62 @@ blkio_scale() {
 blkio_format_bps() {
     printf '%smib\n' "$1"
 }
+
+# 从 fio JSON 取值：优先 jq，其次 python3，最后 awk
+blkio_fio_value_jq() {
+    local json="$1" dir="$2" metric="$3" value
+    command -v jq >/dev/null 2>&1 || return 1
+    value=$(jq -r --arg d "$dir" --arg m "$metric" '.jobs[0][$d][$m] // empty' "$json" 2>/dev/null) || return 1
+    [ -n "$value" ] || return 1
+    printf '%s\n' "$value"
+}
+
+blkio_fio_value_python() {
+    local json="$1" dir="$2" metric="$3"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$json" "$dir" "$metric" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        job = json.load(handle)["jobs"][0]
+    print(job[sys.argv[2]][sys.argv[3]])
+except Exception:
+    sys.exit(1)
+PY
+}
+
+# 无 jq/python3 时的最小解析：依赖 fio 默认的缩进 JSON；
+# 目标段必含请求的指标，因此 indir 置位后不在段间复位
+blkio_fio_value_awk() {
+    awk -v dir="\"$2\"" -v metric="\"$3\"" '
+        index($0, "\"jobs\"") { injobs = 1 }
+        injobs && index($0, dir) { indir = 1 }
+        indir && match($0, metric "[ \t]*:[ \t]*[0-9.]+") {
+            value = substr($0, RSTART, RLENGTH)
+            sub(/^[^:]*:[ \t]*/, "", value)
+            print value
+            exit
+        }
+    ' "$1"
+}
+
+# 合法数值：整数或小数（不接受空、负号、多个小数点、首尾小数点）
+blkio_is_number() {
+    case "$1" in
+        ''|*[!0-9.]*|*.*.*|.*|*.) return 1 ;;
+    esac
+    return 0
+}
+
+blkio_fio_value() {
+    local json="$1" dir="$2" metric="$3" value
+    value=$(blkio_fio_value_jq "$json" "$dir" "$metric") &&
+        blkio_is_number "$value" && { printf '%s\n' "$value"; return 0; }
+    value=$(blkio_fio_value_python "$json" "$dir" "$metric") &&
+        blkio_is_number "$value" && { printf '%s\n' "$value"; return 0; }
+    value=$(blkio_fio_value_awk "$json" "$dir" "$metric" 2>/dev/null) || return 1
+    blkio_is_number "$value" || return 1
+    printf '%s\n' "$value"
+}

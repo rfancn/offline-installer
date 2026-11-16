@@ -19,6 +19,8 @@ BLKIO_PEAK_READ_MIB=0
 BLKIO_PEAK_WRITE_MIB=0
 BLKIO_PEAK_READ_IOPS=0
 BLKIO_PEAK_WRITE_IOPS=0
+BLKIO_PEAK_READ_IOPS_STATIC=0
+BLKIO_PEAK_WRITE_IOPS_STATIC=0
 BLKIO_READ_LIMIT_MIB=0
 BLKIO_WRITE_LIMIT_MIB=0
 BLKIO_READ_LIMIT_IOPS=0
@@ -117,4 +119,257 @@ blkio_fio_value() {
     value=$(blkio_fio_value_awk "$json" "$dir" "$metric" 2>/dev/null) || return 1
     blkio_is_number "$value" || return 1
     printf '%s\n' "$value"
+}
+
+# 取数据目录底层块设备；无法探测时返回 1
+blkio_detect_device() {
+    local src
+    command -v findmnt >/dev/null 2>&1 || return 1
+    src=$(findmnt -no SOURCE -T "$SERVICE_DIR/data" 2>/dev/null) || return 1
+    [ -n "$src" ] || return 1
+    blkio_strip_subvol "$src"
+}
+
+# 测试文件大小（MiB）：min(1 GiB, 可用空间/4)，不足 256 MiB 返回 1
+blkio_probe_size_mib() {
+    local avail_kb size_mib
+    avail_kb=$(df -Pk "$SERVICE_DIR/data" 2>/dev/null | awk 'NR==2 {print $4}')
+    case "$avail_kb" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    size_mib=$((avail_kb / 1024 / 4))
+    [ "$size_mib" -gt 1024 ] && size_mib=1024
+    [ "$size_mib" -lt 256 ] && return 1
+    printf '%s\n' "$size_mib"
+}
+
+# 自 /proc/uptime 取厘秒数（顺序测速用）
+blkio_now_cs() {
+    awk '{ printf "%d\n", $1 * 100 }' /proc/uptime
+}
+
+# 纳秒时间戳；不支持 %N 时返回 1（随机 IOPS 用）
+blkio_now_ns() {
+    local ns
+    ns=$(date +%s%N 2>/dev/null)
+    case "$ns" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s\n' "$ns"
+}
+
+# 运行一组 fio 测试并输出指标；失败返回 1
+# 参数: 文件 JSON路径 rw bs iodepth read|write bw|iops
+blkio_fio_run() {
+    local file="$1" json="$2" rw="$3" bs="$4" depth="$5" dir="$6" metric="$7" size
+    size=$(stat -c %s "$file" 2>/dev/null) || return 1
+    fio --name="rustfs-$rw" --filename="$file" --size="$size" --rw="$rw" --bs="$bs" \
+        --direct=1 --ioengine=libaio --iodepth="$depth" \
+        --runtime=10 --time_based --group_reporting \
+        --output-format=json --output="$json" >/dev/null 2>&1 || return 1
+    blkio_fio_value "$json" "$dir" "$metric"
+}
+
+# 浮点指标截断为整数，并校验 > 0
+blkio_to_int_positive() {
+    local value
+    value=$(awk -v v="$1" 'BEGIN { printf "%d", int(v + 0) }')
+    blkio_is_pos_int "$value" || return 1
+    printf '%s\n' "$value"
+}
+
+# fio 四组测试，结果写入 BLKIO_PEAK_*；失败返回 1
+blkio_peak_from_fio() {
+    local file="$1" dir="$2" raw
+    raw=$(blkio_fio_run "$file" "$dir/seqread.json" read 1M 8 read bw) || return 1
+    BLKIO_PEAK_READ_MIB=$(awk -v v="$raw" 'BEGIN { printf "%d", int(v / 1024) }')
+    raw=$(blkio_fio_run "$file" "$dir/seqwrite.json" write 1M 8 write bw) || return 1
+    BLKIO_PEAK_WRITE_MIB=$(awk -v v="$raw" 'BEGIN { printf "%d", int(v / 1024) }')
+    raw=$(blkio_fio_run "$file" "$dir/randread.json" randread 4k 32 read iops) || return 1
+    BLKIO_PEAK_READ_IOPS=$(blkio_to_int_positive "$raw") || return 1
+    raw=$(blkio_fio_run "$file" "$dir/randwrite.json" randwrite 4k 32 write iops) || return 1
+    BLKIO_PEAK_WRITE_IOPS=$(blkio_to_int_positive "$raw") || return 1
+    [ "$BLKIO_PEAK_READ_MIB" -gt 0 ] || return 1
+    [ "$BLKIO_PEAK_WRITE_MIB" -gt 0 ] || return 1
+    return 0
+}
+
+# dd 随机 IOPS 估算；扣除同偏移基线耗时。失败返回 1
+# 参数: read|write 文件 总4KiB块数
+blkio_dd_random_iops() {
+    local mode="$1" file="$2" blocks="$3"
+    local ops=128 base_ops=32 i off start end base_start total_ns base_ns denom iops
+    start=$(blkio_now_ns) || return 1
+    for ((i = 0; i < ops; i++)); do
+        off=$(( (RANDOM << 15 | RANDOM) % blocks ))
+        if [ "$mode" = read ]; then
+            dd if="$file" of=/dev/null bs=4k count=1 skip="$off" iflag=direct status=none 2>/dev/null || return 1
+        else
+            dd if=/dev/zero of="$file" bs=4k count=1 seek="$off" oflag=direct conv=notrunc status=none 2>/dev/null || return 1
+        fi
+    done
+    end=$(blkio_now_ns) || return 1
+    total_ns=$((end - start))
+
+    base_start=$(blkio_now_ns) || return 1
+    for ((i = 0; i < base_ops; i++)); do
+        if [ "$mode" = read ]; then
+            dd if="$file" of=/dev/null bs=4k count=1 skip=0 iflag=direct status=none 2>/dev/null || return 1
+        else
+            dd if=/dev/zero of="$file" bs=4k count=1 seek=0 oflag=direct conv=notrunc status=none 2>/dev/null || return 1
+        fi
+    done
+    end=$(blkio_now_ns) || return 1
+    base_ns=$((end - base_start))
+
+    denom=$((total_ns - base_ns * ops / base_ops))
+    [ "$denom" -gt $((total_ns / 8)) ] || return 1
+    iops=$((ops * 1000000000 / denom))
+    [ "$iops" -ge 10 ] || return 1
+    [ "$iops" -le 100000 ] || return 1
+    printf '%s\n' "$iops"
+}
+
+# 顺序带宽（MiB/s）：优先纳秒计时，不可用时退回 /proc/uptime 厘秒
+# 参数: 文件 大小MiB read|write
+blkio_seq_mibs() {
+    local file="$1" size_mib="$2" mode="$3" start_ns end_ns elapsed_ns start_cs end_cs elapsed_cs
+    if start_ns=$(blkio_now_ns); then
+        if [ "$mode" = read ]; then
+            dd if="$file" of=/dev/null bs=1M count="$size_mib" iflag=direct status=none 2>/dev/null || return 1
+        else
+            dd if=/dev/zero of="$file" bs=1M count="$size_mib" oflag=direct conv=fsync status=none 2>/dev/null || return 1
+        fi
+        end_ns=$(blkio_now_ns) || return 1
+        elapsed_ns=$((end_ns - start_ns))
+        [ "$elapsed_ns" -gt 0 ] || return 1
+        printf '%s\n' "$((size_mib * 1000000000 / elapsed_ns))"
+        return 0
+    fi
+
+    start_cs=$(blkio_now_cs)
+    if [ "$mode" = read ]; then
+        dd if="$file" of=/dev/null bs=1M count="$size_mib" iflag=direct status=none 2>/dev/null || return 1
+    else
+        dd if=/dev/zero of="$file" bs=1M count="$size_mib" oflag=direct conv=fsync status=none 2>/dev/null || return 1
+    fi
+    end_cs=$(blkio_now_cs)
+    elapsed_cs=$((end_cs - start_cs))
+    [ "$elapsed_cs" -gt 0 ] || return 1
+    printf '%s\n' "$((size_mib * 100 / elapsed_cs))"
+}
+
+# dd 顺序带宽 + 随机 IOPS，结果写入 BLKIO_PEAK_*；失败返回 1
+blkio_peak_from_dd() {
+    local file="$1" size_mib="$2"
+    BLKIO_PEAK_READ_MIB=$(blkio_seq_mibs "$file" "$size_mib" read) || return 1
+    [ "$BLKIO_PEAK_READ_MIB" -gt 0 ] || return 1
+    BLKIO_PEAK_WRITE_MIB=$(blkio_seq_mibs "$file" "$size_mib" write) || return 1
+    [ "$BLKIO_PEAK_WRITE_MIB" -gt 0 ] || return 1
+
+    if BLKIO_PEAK_READ_IOPS=$(blkio_dd_random_iops read "$file" "$((size_mib * 256))"); then
+        BLKIO_PEAK_READ_IOPS_STATIC=0
+    else
+        BLKIO_PEAK_READ_IOPS=$BLKIO_STATIC_READ_IOPS
+        BLKIO_PEAK_READ_IOPS_STATIC=1
+        printf "⚠️  随机读 IOPS 不可靠，使用静态值 %s。\n" "$BLKIO_STATIC_READ_IOPS" >&2
+    fi
+    if BLKIO_PEAK_WRITE_IOPS=$(blkio_dd_random_iops write "$file" "$((size_mib * 256))"); then
+        BLKIO_PEAK_WRITE_IOPS_STATIC=0
+    else
+        BLKIO_PEAK_WRITE_IOPS=$BLKIO_STATIC_WRITE_IOPS
+        BLKIO_PEAK_WRITE_IOPS_STATIC=1
+        printf "⚠️  随机写 IOPS 不可靠，使用静态值 %s。\n" "$BLKIO_STATIC_WRITE_IOPS" >&2
+    fi
+    return 0
+}
+
+# 测速并把峰值写入 BLKIO_PEAK_*；失败返回 1（调用方使用静态值）
+blkio_measure() {
+    local size_mib file tmpdir
+    BLKIO_PEAK_READ_IOPS_STATIC=0
+    BLKIO_PEAK_WRITE_IOPS_STATIC=0
+    BLKIO_PEAK_READ_MIB=0
+    BLKIO_PEAK_WRITE_MIB=0
+    BLKIO_PEAK_READ_IOPS=0
+    BLKIO_PEAK_WRITE_IOPS=0
+    size_mib=$(blkio_probe_size_mib) || return 1
+    file="$SERVICE_DIR/data/.blkio-probe"
+    BLKIO_PROBE_FILE="$file"
+
+    printf "🔍 正在测速（预计 40–60 秒，测试文件 %s MiB）...\n" "$size_mib"
+    rm -f "$file"
+    dd if=/dev/zero of="$file" bs=1M count="$size_mib" oflag=direct conv=fsync status=none 2>/dev/null || {
+        blkio_cleanup
+        return 1
+    }
+
+    if command -v fio >/dev/null 2>&1; then
+        if tmpdir=$(mktemp -d); then
+            if blkio_peak_from_fio "$file" "$tmpdir"; then
+                rm -rf "$tmpdir"
+                blkio_cleanup
+                return 0
+            fi
+            rm -rf "$tmpdir"
+            printf "⚠️  fio 测速失败，改用 dd 估算。\n" >&2
+        else
+            printf "⚠️  无法创建 fio 临时目录，改用 dd 估算。\n" >&2
+        fi
+    fi
+
+    if blkio_peak_from_dd "$file" "$size_mib"; then
+        blkio_cleanup
+        return 0
+    fi
+    blkio_cleanup
+    return 1
+}
+
+# 使用静态保守值作为峰值
+blkio_use_static_peaks() {
+    BLKIO_PEAK_IS_STATIC=1
+    BLKIO_PEAK_READ_MIB=$BLKIO_STATIC_READ_MIB
+    BLKIO_PEAK_WRITE_MIB=$BLKIO_STATIC_WRITE_MIB
+    BLKIO_PEAK_READ_IOPS=$BLKIO_STATIC_READ_IOPS
+    BLKIO_PEAK_WRITE_IOPS=$BLKIO_STATIC_WRITE_IOPS
+    BLKIO_PEAK_READ_IOPS_STATIC=1
+    BLKIO_PEAK_WRITE_IOPS_STATIC=1
+}
+
+# 确定限速设备；成功 0，无法限速 1，EOF 中止 2
+resolve_blkio_device() {
+    local detected device
+    detected=$(blkio_detect_device) || detected=""
+
+    if [ -n "$detected" ] && [ ! -b "$detected" ]; then
+        printf "⚠️  数据目录所在位置 '%s' 不是块设备，跳过 I/O 限速。\n" "$detected" >&2
+        return 1
+    fi
+    [ -n "$detected" ] || printf "⚠️  未能自动探测数据目录所在块设备，请手动输入。\n"
+
+    while true; do
+        if [ -n "$detected" ]; then
+            printf "请输入需要限速的块设备 [%s]: " "$detected"
+        else
+            printf "请输入需要限速的块设备: "
+        fi
+        if ! read -r device; then
+            [ -n "$device" ] || { printf "\n❌ 输入已结束（EOF），已中止。\n" >&2; return 2; }
+        fi
+        device="${device:-$detected}"
+        if [ -z "$device" ]; then
+            printf "❌ 设备路径不能为空。\n" >&2
+            continue
+        fi
+        if [ ! -b "$device" ]; then
+            printf "❌ '%s' 不是块设备，请重新输入。\n" "$device" >&2
+            continue
+        fi
+        if [ -n "$detected" ] && [ "$device" != "$detected" ]; then
+            printf "⚠️  该设备与数据目录所在设备不同，限速可能不作用于 rustfs 的实际 I/O。\n"
+        fi
+        BLKIO_DEVICE="$device"
+        return 0
+    done
 }

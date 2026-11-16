@@ -138,6 +138,100 @@ assert_eq "回退到 python3 解析读带宽" "421888" \
 assert_eq "回退到 awk 解析读带宽" "421888" \
     "$(PATH="$TMP_DIR/nojqpy:$PATH" blkio_fio_value "$TMP_DIR/fio.json" read bw)"
 
+# ---- 设备探测与测速纯逻辑 ----
+mkdir -p "$TMP_DIR/fakebin" "$TMP_DIR/probe-data"
+cat > "$TMP_DIR/fakebin/df" <<'EOF'
+#!/bin/sh
+printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+printf '/dev/mock 1000000 0 %s 0%% /mock\n' "${DF_AVAIL_KB:-0}"
+EOF
+chmod +x "$TMP_DIR/fakebin/df"
+SERVICE_DIR="$TMP_DIR"
+probe_size_with() {
+    DF_AVAIL_KB="$1" PATH="$TMP_DIR/fakebin:$PATH" blkio_probe_size_mib
+}
+assert_eq "可用空间 1 GiB 取四分之一" "256" "$(probe_size_with 1048576)"
+assert_eq "可用空间充足时封顶 1 GiB" "1024" "$(probe_size_with 8388608)"
+assert_false "空间不足返回失败" probe_size_with 102400
+assert_false "df 输出非法返回失败" probe_size_with abc
+assert_false "0.9 截断后为 0 应失败" blkio_to_int_positive 0.9
+assert_false "非数字指标应失败" blkio_to_int_positive abc
+assert_false "超过 9 位应失败" blkio_to_int_positive 1000000000
+
+# ---- dd 回退的单项降级 ----
+# 计时器在命令替换子 shell 中运行，用文件记录调用序号才能跨调用递增
+fake_ns_init() {
+    _ns_seq="$TMP_DIR/ns-seq.txt"
+    : > "$_ns_seq"
+    blkio_now_ns() {
+        local idx
+        idx=$(( $(wc -l < "$_ns_seq") + 1 ))
+        printf 'x\n' >> "$_ns_seq"
+        printf '%s\n' "$((idx * 100000000))"
+    }
+}
+dd_fallback_out=$(
+    dd() { :; }
+    fake_ns_init
+    blkio_dd_random_iops() { return 1; }
+    BLKIO_PEAK_READ_IOPS_STATIC=0
+    BLKIO_PEAK_WRITE_IOPS_STATIC=0
+    if blkio_peak_from_dd /nonexistent 64 2>/dev/null; then
+        printf '0,%s,%s,%s,%s,%s,%s\n' "$BLKIO_PEAK_READ_MIB" "$BLKIO_PEAK_WRITE_MIB" \
+            "$BLKIO_PEAK_READ_IOPS" "$BLKIO_PEAK_WRITE_IOPS" \
+            "$BLKIO_PEAK_READ_IOPS_STATIC" "$BLKIO_PEAK_WRITE_IOPS_STATIC"
+    else
+        printf '1\n'
+    fi
+)
+assert_eq "随机 IOPS 失败仍保留顺序带宽并回退静态值" \
+    "0,640,640,400,80,1,1" "$dd_fallback_out"
+
+dd_success_out=$(
+    dd() { :; }
+    fake_ns_init
+    blkio_dd_random_iops() {
+        case "$1" in
+            read) printf '5000\n' ;;
+            write) printf '3000\n' ;;
+        esac
+    }
+    BLKIO_PEAK_READ_IOPS_STATIC=0
+    BLKIO_PEAK_WRITE_IOPS_STATIC=0
+    if blkio_peak_from_dd /nonexistent 64 2>/dev/null; then
+        printf '0,%s,%s,%s,%s,%s,%s\n' "$BLKIO_PEAK_READ_MIB" "$BLKIO_PEAK_WRITE_MIB" \
+            "$BLKIO_PEAK_READ_IOPS" "$BLKIO_PEAK_WRITE_IOPS" \
+            "$BLKIO_PEAK_READ_IOPS_STATIC" "$BLKIO_PEAK_WRITE_IOPS_STATIC"
+    else
+        printf '1\n'
+    fi
+)
+assert_eq "随机 IOPS 成功时不置静态标志" "0,640,640,5000,3000,0,0" "$dd_success_out"
+
+# ---- 随机 IOPS 可信区间 ----
+run_dd_random_with_ns() {
+    (
+        dd() { :; }
+        _seq="$TMP_DIR/ns-seq.txt"
+        _log="$TMP_DIR/ns-log.txt"
+        printf '%s\n' "$1" > "$_seq"
+        : > "$_log"
+        blkio_now_ns() {
+            local idx value
+            idx=$(( $(wc -l < "$_log") + 1 ))
+            printf 'x\n' >> "$_log"
+            value=$(sed -n "${idx}p" "$_seq")
+            [ -n "$value" ] || return 1
+            printf '%s\n' "$value"
+        }
+        blkio_dd_random_iops read /nonexistent 1
+    )
+}
+assert_eq "随机 IOPS 信噪比达标时输出" "64000" \
+    "$(run_dd_random_with_ns $'0\n10000000\n10000000\n12000000')"
+assert_false "信噪比不足时失败" run_dd_random_with_ns $'0\n16000000\n16000000\n19500000'
+assert_false "超过 IOPS 上界时失败" run_dd_random_with_ns $'0\n10000000\n10000000\n12180250'
+
 printf -- "----------------------------------------\n"
 printf "通过 %d，失败 %d\n" "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

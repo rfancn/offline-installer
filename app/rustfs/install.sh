@@ -86,14 +86,22 @@ if [ "$INSTALL_MODE" = direct ]; then
     S3_ENDPOINT="http://${DIRECT_HOST}:${S3_PORT}"
 else
     require_root_domain || exit 1
+    read_prefix "S3 API 域名前缀" "s3" S3_PREFIX || exit 1
+    S3_HOST="${S3_PREFIX}.${ROOT_DOMAIN}"
+    ensure_domain_covered "$S3_HOST" || exit 1
     read_prefix "Console 域名前缀" "oss" CONSOLE_PREFIX || exit 1
     CONSOLE_HOST="${CONSOLE_PREFIX}.${ROOT_DOMAIN}"
     ensure_domain_covered "$CONSOLE_HOST" || exit 1
+    if [ "$S3_HOST" = "$CONSOLE_HOST" ]; then
+        printf "❌ S3 API 与 Console 域名不能相同。\n" >&2
+        exit 1
+    fi
     S3_PORT=9000
     CONSOLE_PORT=9001
     cp resource/docker-compose.yml "$SERVICE_DIR/docker-compose.yml"
+    sed -i "s|__S3_HOST__|$(sed_escape "$S3_HOST")|g" "$SERVICE_DIR/docker-compose.yml"
     sed -i "s|__CONSOLE_HOST__|$(sed_escape "$CONSOLE_HOST")|g" "$SERVICE_DIR/docker-compose.yml"
-    S3_ENDPOINT="http://rustfs:9000"
+    S3_ENDPOINT="https://${S3_HOST}"
 fi
 
 # 渲染 .env
@@ -111,9 +119,11 @@ if [ "$INSTALL_MODE" = direct ]; then
     printf "Console: http://%s:%s\n" "$DIRECT_HOST" "$CONSOLE_PORT"
     open_firewall_ports "$S3_PORT/tcp" "$CONSOLE_PORT/tcp"
 else
-    printf "S3 API:  %s（仅容器网络内可访问）\n" "$S3_ENDPOINT"
+    printf "S3 API:  %s（path-style）\n" "$S3_ENDPOINT"
     printf "Console: https://%s\n" "$CONSOLE_HOST"
-    printf "⚠️  请确认 Console 域名已解析到本机，并在客户端信任 mkcert 根证书。\n"
+    printf "⚠️  S3 客户端请使用 path-style 寻址，例如 %s/<bucket>/<key>\n" "$S3_ENDPOINT"
+    printf "⚠️  请确认 S3/Console 域名已解析到本机，并在客户端信任 mkcert 根证书。\n"
+    printf "⚠️  已安装的 traefik 需更新 compose（readTimeout/writeTimeout=600s）并重启，大文件传输才会生效。\n"
 fi
 printf -- "----------------------------------------\n"
 printf "root 凭据（仅用于初始化）:\n"

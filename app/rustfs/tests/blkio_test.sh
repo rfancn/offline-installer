@@ -42,6 +42,37 @@ assert_false() {
     esac
 }
 
+assert_rc() {
+    local expected="$1" desc="$2"
+    shift 2
+    local rc
+    "$@" >/dev/null 2>&1
+    rc=$?
+    if [ "$rc" -eq "$expected" ]; then
+        PASS=$((PASS + 1)); printf "✅ %s\n" "$desc"
+    else
+        FAIL=$((FAIL + 1)); printf "❌ %s：期望 rc=%s，实际 rc=%s\n" "$desc" "$expected" "$rc"
+    fi
+}
+
+assert_file_contains() {
+    local desc="$1" file="$2" pattern="$3"
+    if grep -q -- "$pattern" "$file"; then
+        PASS=$((PASS + 1)); printf "✅ %s\n" "$desc"
+    else
+        FAIL=$((FAIL + 1)); printf "❌ %s：未找到 '%s'\n" "$desc" "$pattern"
+    fi
+}
+
+assert_file_not_contains() {
+    local desc="$1" file="$2" pattern="$3"
+    if grep -q -- "$pattern" "$file"; then
+        FAIL=$((FAIL + 1)); printf "❌ %s：不应出现 '%s'\n" "$desc" "$pattern"
+    else
+        PASS=$((PASS + 1)); printf "✅ %s\n" "$desc"
+    fi
+}
+
 # ---- 纯函数 ----
 assert_eq "剥离子卷后缀" "/dev/sda1" "$(blkio_strip_subvol '/dev/sda1[/@]')"
 assert_eq "普通设备原样返回" "/dev/md0" "$(blkio_strip_subvol '/dev/md0')"
@@ -231,6 +262,136 @@ assert_eq "随机 IOPS 信噪比达标时输出" "64000" \
     "$(run_dd_random_with_ns $'0\n10000000\n10000000\n12000000')"
 assert_false "信噪比不足时失败" run_dd_random_with_ns $'0\n16000000\n16000000\n19500000'
 assert_false "超过 IOPS 上界时失败" run_dd_random_with_ns $'0\n10000000\n10000000\n12180250'
+
+# ---- 建议值与逐项确认 ----
+BLKIO_PEAK_IS_STATIC=0
+BLKIO_DEVICE=/dev/md0
+BLKIO_PEAK_READ_MIB=412
+BLKIO_PEAK_WRITE_MIB=385
+BLKIO_PEAK_READ_IOPS=2010
+BLKIO_PEAK_WRITE_IOPS=725
+BLKIO_PEAK_READ_IOPS_STATIC=0
+BLKIO_PEAK_WRITE_IOPS_STATIC=0
+blkio_ask_limits <<< $'\n\n\n\n'
+assert_eq "默认建议读带宽" "329" "$BLKIO_READ_LIMIT_MIB"
+assert_eq "默认建议写带宽" "308" "$BLKIO_WRITE_LIMIT_MIB"
+assert_eq "默认建议读 IOPS" "1608" "$BLKIO_READ_LIMIT_IOPS"
+assert_eq "默认建议写 IOPS" "580" "$BLKIO_WRITE_LIMIT_IOPS"
+
+BLKIO_PEAK_IS_STATIC=0
+BLKIO_PEAK_READ_IOPS_STATIC=0
+BLKIO_PEAK_WRITE_IOPS_STATIC=0
+blkio_ask_limits <<< $'100\n50\n10\n20\n'
+assert_eq "手工覆盖读带宽" "100" "$BLKIO_READ_LIMIT_MIB"
+assert_eq "手工覆盖写带宽" "50" "$BLKIO_WRITE_LIMIT_MIB"
+assert_eq "手工覆盖读 IOPS" "10" "$BLKIO_READ_LIMIT_IOPS"
+assert_eq "手工覆盖写 IOPS" "20" "$BLKIO_WRITE_LIMIT_IOPS"
+
+BLKIO_PEAK_IS_STATIC=0
+BLKIO_PEAK_READ_IOPS_STATIC=0
+BLKIO_PEAK_WRITE_IOPS_STATIC=0
+blkio_ask_limits <<< $'300mib\n\n\n\n\n'
+assert_eq "非法输入后回车取默认值" "329" "$BLKIO_READ_LIMIT_MIB"
+
+BLKIO_PEAK_IS_STATIC=0
+BLKIO_PEAK_READ_MIB=412
+BLKIO_PEAK_WRITE_MIB=385
+BLKIO_PEAK_READ_IOPS=1999
+BLKIO_PEAK_WRITE_IOPS=777
+BLKIO_PEAK_READ_IOPS_STATIC=1
+BLKIO_PEAK_WRITE_IOPS_STATIC=1
+blkio_ask_limits <<< $'\n\n\n\n'
+assert_eq "单项静态读带宽仍折算" "329" "$BLKIO_READ_LIMIT_MIB"
+assert_eq "单项静态写带宽仍折算" "308" "$BLKIO_WRITE_LIMIT_MIB"
+assert_eq "单项静态读 IOPS 不再折算" "400" "$BLKIO_READ_LIMIT_IOPS"
+assert_eq "单项静态写 IOPS 不再折算" "80" "$BLKIO_WRITE_LIMIT_IOPS"
+
+BLKIO_PEAK_IS_STATIC=1
+blkio_ask_limits <<< $'\n\n\n\n'
+assert_eq "全静态读带宽" "250" "$BLKIO_READ_LIMIT_MIB"
+assert_eq "全静态写带宽" "120" "$BLKIO_WRITE_LIMIT_MIB"
+assert_eq "全静态读 IOPS" "400" "$BLKIO_READ_LIMIT_IOPS"
+assert_eq "全静态写 IOPS" "80" "$BLKIO_WRITE_LIMIT_IOPS"
+
+ask_limits_eof() { blkio_ask_limits </dev/null; }
+read_limit_eof() { blkio_read_limit dummy 5 DUMMY_VALUE </dev/null; }
+assert_rc 2 "ask_limits EOF 中止" ask_limits_eof
+assert_rc 2 "read_limit EOF 中止" read_limit_eof
+
+# ---- 渲染与删除 ----
+cat > "$TMP_DIR/compose.yml" <<'EOF'
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    restart: unless-stopped
+    # __BLKIO_BEGIN__
+    blkio_config:
+      weight: 500
+      device_read_bps:
+        - path: __BLKIO_DEVICE__
+          rate: "__BLKIO_READ_BPS__"
+      device_write_bps:
+        - path: __BLKIO_DEVICE__
+          rate: "__BLKIO_WRITE_BPS__"
+      device_read_iops:
+        - path: __BLKIO_DEVICE__
+          rate: __BLKIO_READ_IOPS__
+      device_write_iops:
+        - path: __BLKIO_DEVICE__
+          rate: __BLKIO_WRITE_IOPS__
+    # __BLKIO_END__
+EOF
+
+BLKIO_DEVICE=/dev/md0
+BLKIO_READ_LIMIT_MIB=329
+BLKIO_WRITE_LIMIT_MIB=308
+BLKIO_READ_LIMIT_IOPS=1608
+BLKIO_WRITE_LIMIT_IOPS=580
+blkio_render_config "$TMP_DIR/compose.yml"
+assert_file_contains "设备路径已替换" "$TMP_DIR/compose.yml" "path: /dev/md0"
+assert_file_contains "读带宽已替换" "$TMP_DIR/compose.yml" 'rate: "329mib"'
+assert_file_contains "写带宽已替换" "$TMP_DIR/compose.yml" 'rate: "308mib"'
+assert_file_contains "读 IOPS 已替换" "$TMP_DIR/compose.yml" "rate: 1608"
+assert_file_contains "写 IOPS 已替换" "$TMP_DIR/compose.yml" "rate: 580"
+assert_file_not_contains "占位符全部替换" "$TMP_DIR/compose.yml" "__BLKIO_"
+assert_file_not_contains "标记行已删除" "$TMP_DIR/compose.yml" "__BLKIO_BEGIN__"
+assert_file_contains "无关 YAML 配置保留" "$TMP_DIR/compose.yml" "restart: unless-stopped"
+
+cp "$TMP_DIR/compose.yml" "$TMP_DIR/compose-first.yml"
+blkio_render_config "$TMP_DIR/compose.yml"
+assert_true "重复渲染保持幂等" cmp -s "$TMP_DIR/compose-first.yml" "$TMP_DIR/compose.yml"
+
+cat > "$TMP_DIR/compose-nomarker.yml" <<'EOF'
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+EOF
+cp "$TMP_DIR/compose-nomarker.yml" "$TMP_DIR/compose-nomarker-before.yml"
+blkio_remove_config "$TMP_DIR/compose-nomarker.yml"
+assert_true "无标记文件删除为 no-op" cmp -s "$TMP_DIR/compose-nomarker-before.yml" "$TMP_DIR/compose-nomarker.yml"
+
+cat > "$TMP_DIR/compose-unpaired.yml" <<'EOF'
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    # __BLKIO_BEGIN__
+    keep: yes
+EOF
+blkio_remove_config "$TMP_DIR/compose-unpaired.yml"
+assert_file_contains "标记不成对时不删除" "$TMP_DIR/compose-unpaired.yml" "keep: yes"
+
+cat > "$TMP_DIR/compose-remove.yml" <<'EOF'
+services:
+  rustfs:
+    image: rustfs/rustfs:latest
+    # __BLKIO_BEGIN__
+    blkio_config:
+      weight: 500
+    # __BLKIO_END__
+EOF
+blkio_remove_config "$TMP_DIR/compose-remove.yml"
+assert_file_not_contains "blkio 段已删除" "$TMP_DIR/compose-remove.yml" "blkio_config"
+assert_file_contains "其余配置保留" "$TMP_DIR/compose-remove.yml" "image: rustfs/rustfs:latest"
 
 printf -- "----------------------------------------\n"
 printf "通过 %d，失败 %d\n" "$PASS" "$FAIL"

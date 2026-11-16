@@ -373,3 +373,79 @@ resolve_blkio_device() {
         return 0
     done
 }
+
+# 读取一项正整数上限；EOF 返回 2
+blkio_read_limit() {
+    local label="$1" default="$2" var_name="$3" value
+    while true; do
+        printf "  %s [%s]: " "$label" "$default"
+        if ! read -r value; then
+            [ -n "$value" ] || { printf "\n❌ 输入已结束（EOF），已中止。\n" >&2; return 2; }
+        fi
+        value="${value:-$default}"
+        if blkio_is_pos_int "$value"; then
+            printf -v "$var_name" '%s' "$value"
+            return 0
+        fi
+        printf "❌ 请输入正整数（不要带单位）。\n" >&2
+    done
+}
+
+# 计算建议值并逐项确认；单项静态项直接使用静态值；EOF 返回 2
+blkio_ask_limits() {
+    local rd_bps wr_bps rd_iops wr_iops rd_note="" wr_note=""
+    if [ "$BLKIO_PEAK_IS_STATIC" = 1 ]; then
+        rd_bps=$BLKIO_STATIC_READ_MIB
+        wr_bps=$BLKIO_STATIC_WRITE_MIB
+        rd_iops=$BLKIO_STATIC_READ_IOPS
+        wr_iops=$BLKIO_STATIC_WRITE_IOPS
+    else
+        [ "$BLKIO_PEAK_READ_IOPS_STATIC" = 1 ] && rd_note="（静态）"
+        [ "$BLKIO_PEAK_WRITE_IOPS_STATIC" = 1 ] && wr_note="（静态）"
+        printf "📊 测速结果（%s）：\n" "$BLKIO_DEVICE"
+        printf "  顺序读 %s MiB/s    顺序写 %s MiB/s\n" "$BLKIO_PEAK_READ_MIB" "$BLKIO_PEAK_WRITE_MIB"
+        printf "  随机读 %s IOPS%s    随机写 %s IOPS%s\n" \
+            "$BLKIO_PEAK_READ_IOPS" "$rd_note" "$BLKIO_PEAK_WRITE_IOPS" "$wr_note"
+        rd_bps=$(blkio_scale "$BLKIO_PEAK_READ_MIB" "$BLKIO_SUGGEST_PERCENT")
+        wr_bps=$(blkio_scale "$BLKIO_PEAK_WRITE_MIB" "$BLKIO_SUGGEST_PERCENT")
+        if [ "$BLKIO_PEAK_READ_IOPS_STATIC" = 1 ]; then
+            rd_iops=$BLKIO_STATIC_READ_IOPS
+        else
+            rd_iops=$(blkio_scale "$BLKIO_PEAK_READ_IOPS" "$BLKIO_SUGGEST_PERCENT")
+        fi
+        if [ "$BLKIO_PEAK_WRITE_IOPS_STATIC" = 1 ]; then
+            wr_iops=$BLKIO_STATIC_WRITE_IOPS
+        else
+            wr_iops=$(blkio_scale "$BLKIO_PEAK_WRITE_IOPS" "$BLKIO_SUGGEST_PERCENT")
+        fi
+    fi
+
+    printf "请确认限速上限（带宽单位固定为 MiB/s，IOPS 直接输入次数；只输入数字，回车采用建议值）\n"
+    blkio_read_limit "读带宽上限 (MiB/s)" "$rd_bps" BLKIO_READ_LIMIT_MIB || return 2
+    blkio_read_limit "写带宽上限 (MiB/s)" "$wr_bps" BLKIO_WRITE_LIMIT_MIB || return 2
+    blkio_read_limit "读 IOPS 上限" "$rd_iops" BLKIO_READ_LIMIT_IOPS || return 2
+    blkio_read_limit "写 IOPS 上限" "$wr_iops" BLKIO_WRITE_LIMIT_IOPS || return 2
+    return 0
+}
+
+# 删除模板中的 blkio 段（标记不成对或无标记时不做任何事）
+blkio_remove_config() {
+    local compose="$1"
+    grep -q '^[[:space:]]*# __BLKIO_BEGIN__$' "$compose" || return 0
+    grep -q '^[[:space:]]*# __BLKIO_END__$' "$compose" || return 0
+    sed -i '/^[[:space:]]*# __BLKIO_BEGIN__$/,/^[[:space:]]*# __BLKIO_END__$/d' "$compose" || return 1
+}
+
+# 替换占位符并删除标记行
+blkio_render_config() {
+    local compose="$1"
+    sed -i \
+        -e "s|__BLKIO_DEVICE__|$(sed_escape "$BLKIO_DEVICE")|g" \
+        -e "s|__BLKIO_READ_BPS__|$(blkio_format_bps "$BLKIO_READ_LIMIT_MIB")|g" \
+        -e "s|__BLKIO_WRITE_BPS__|$(blkio_format_bps "$BLKIO_WRITE_LIMIT_MIB")|g" \
+        -e "s|__BLKIO_READ_IOPS__|$BLKIO_READ_LIMIT_IOPS|g" \
+        -e "s|__BLKIO_WRITE_IOPS__|$BLKIO_WRITE_LIMIT_IOPS|g" \
+        "$compose" || return 1
+    sed -i -e '/^[[:space:]]*# __BLKIO_BEGIN__$/d' -e '/^[[:space:]]*# __BLKIO_END__$/d' "$compose" || return 1
+    return 0
+}

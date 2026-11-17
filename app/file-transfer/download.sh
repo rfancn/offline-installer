@@ -19,8 +19,13 @@ command -v docker >/dev/null 2>&1 || {
 
 mkdir -p "$ASSETS_DIR"
 
-printf "⬇️  正在拉取镜像: %s\n" "$IMAGE"
-docker pull "$IMAGE"
+# 本地优先：已有镜像直接导出，避免不必要的联网拉取
+if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+    printf "📦 使用本地镜像: %s\n" "$IMAGE"
+else
+    printf "⬇️  本地未找到镜像，正在拉取: %s\n" "$IMAGE"
+    docker pull "$IMAGE"
+fi
 
 printf "📦 正在导出镜像到: %s\n" "$TAR_FILE"
 docker save -o "$TAR_FILE" "$IMAGE"

@@ -1,14 +1,13 @@
 services:
   ft-server:
     image: rfancn/file-transfer:latest
-    container_name: ft-server
+    container_name: file-transfer
     restart: unless-stopped
     ports:
       - "${FT_PORT}:8080"
     environment:
       TZ: Asia/Shanghai
-      # IAM 策略目录；镜像内默认为该路径
-      FT_POLICY_DIR: /etc/file-transfer/policy
+      # 桶名、共享目录和策略目录在 ./config/ft-server.toml 中配置
     volumes:
       # 配置、策略、密钥、日志与上游 docker-compose 保持一致
       - ./config:/etc/file-transfer

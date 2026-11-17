@@ -51,9 +51,9 @@ else
 fi
 # ==========================================
 
-# 生成 URL 安全的强随机密钥（用于 root 账号）
+# 生成 10 位 URL 安全的随机密码（用于 root 账号）
 rand_strong_secret() {
-    openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n'
+    openssl rand -base64 32 | tr '+/' '-_' | tr -d '=\n' | cut -c1-10
 }
 
 # 交互读取域名前缀（结果写入第 3 个参数指定的变量）

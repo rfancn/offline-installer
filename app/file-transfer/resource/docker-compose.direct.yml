@@ -7,11 +7,11 @@ services:
       - "${FT_PORT}:8080"
     environment:
       TZ: Asia/Shanghai
-      # 桶名、共享目录和策略目录在 ./config/ft-server.toml 中配置
+      # 桶名和共享目录在 ./config/ft-server.toml 中配置
     volumes:
-      # 配置、策略、密钥、日志与上游 docker-compose 保持一致
+      # 配置、策略、密钥、日志持久化到宿主机；策略挂到工作目录 /app/policy
       - ./config:/etc/file-transfer
-      - ./policy:/etc/file-transfer/policy:ro
+      - ./policy:/app/policy
       - ./secrets:/app/secrets
       - ./logs:/var/log/file-transfer
     # 接入 web 网络，通过 http://rustfs:9000 访问 RustFS

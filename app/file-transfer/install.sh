@@ -97,7 +97,7 @@ sed -i "s|__UPLOAD_SECRET__|$(sed_escape "$UPLOAD_SECRET")|g" "$CONFIG_FILE"
 chmod 600 "$CONFIG_FILE"
 
 # ================= IAM 策略 =================
-# 策略目录只读挂载到容器 /etc/file-transfer/policy；修改后需重启 ft-server 并执行 ft-admin init 生效
+# 策略目录只读挂载到容器工作目录 /app/policy；修改后需重启 ft-server 并执行 ft-admin init 生效
 for f in resource/policy/*.json; do
     [ -e "$f" ] || continue
     dst="$SERVICE_DIR/policy/$(basename "$f")"
@@ -110,7 +110,7 @@ for f in resource/policy/*.json; do
         }
     fi
 done
-# 挂载空目录会覆盖镜像内置策略，导致 ft-server 启动失败
+# 策略目录优先于镜像内置策略，挂载空目录会导致 ft-server 启动失败
 if ! ls "$SERVICE_DIR/policy"/*.json >/dev/null 2>&1; then
     printf "❌ 致命错误: 策略目录中没有 JSON 文件: %s\n" "$SERVICE_DIR/policy"
     exit 1
@@ -143,7 +143,7 @@ fi
 printf "🔐 token_secret / upload_secret 已随机生成: %s\n" "$CONFIG_FILE"
 printf "👤 首次启动将生成管理员账号 admin，密码见 %s/secrets/user.json 或容器日志。\n" "$SERVICE_DIR"
 printf "🔗 RustFS 地址: %s\n" "$S3_ENDPOINT"
-printf "📜 IAM 策略目录: %s（只读挂载到容器 /etc/file-transfer/policy）\n" "$SERVICE_DIR/policy"
+printf "📜 IAM 策略目录: %s（只读挂载到容器 /app/policy）\n" "$SERVICE_DIR/policy"
 printf "   修改策略后：cd %s && docker compose restart ft-server，再在管理端执行 ft-admin init 使策略生效。\n" "$SERVICE_DIR"
 printf "下一步：cd %s && docker compose up -d\n" "$SERVICE_DIR"
 printf "==========================================\n"
